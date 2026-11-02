@@ -42,3 +42,18 @@ step23-import/
 
 test_gateway_packet
 step24-import/
+
+# Local development and generated files
+secrets/
+captures/
+*.pcap
+*.pcapng
+*.zip
+*.bin
+*:Zone.Identifier
+step*-import/
+secure-inline-*-step/
+nfq_gateway
+nfq_observer
+handshake
+test_*

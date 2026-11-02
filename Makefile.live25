@@ -1,0 +1,7 @@
+CC ?= gcc
+CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Werror
+LIBNFQ := $(shell pkg-config --cflags --libs libnetfilter_queue)
+
+.PHONY: live25
+live25:
+	$(CC) $(CFLAGS) -Iinclude src/nfq_gateway.c src/packet.c src/wire_aead.c src/gateway_packet.c -o nfq_gateway $(LIBNFQ) -lcrypto
