@@ -27,6 +27,10 @@ typedef struct {
     sic_receiver rx;
     unsigned long accepted;
     unsigned long dropped;
+    unsigned long forwarded_data;
+    unsigned long forwarded_control;
+    unsigned long failed_parse;
+    unsigned long failed_transform;
 } gateway_ctx;
 
 static int load_lab_key(const char *path, uint8_t material[LAB_KEY_LENGTH]) {
@@ -58,11 +62,16 @@ static int packet_callback(struct nfq_q_handle *queue, struct nfgenmsg *unused,
     int len = nfq_get_payload(data, &payload);
     if (len < 0 || !payload) goto drop;
     sic_tcp_view view;
-    if (sic_parse_tcp4(payload, (size_t)len, &view) != 0) goto drop;
+    if (sic_parse_tcp4(payload, (size_t)len, &view) != 0) {
+        ctx->failed_parse++;
+        fprintf(stderr, "DROP parse: packet_id=%u input_len=%d\n", id, len);
+        goto drop;
+    }
     /* Lab rule must select a single TCP data direction. ACK/control frames
        without payload are passed through unchanged. */
     if (view.payload_len == 0) {
         ctx->accepted++;
+        ctx->forwarded_control++;
         return nfq_set_verdict(queue, id, NF_ACCEPT, 0, NULL);
     }
     uint8_t modified[DATAGRAM_CAPACITY];
@@ -72,21 +81,14 @@ static int packet_callback(struct nfq_q_handle *queue, struct nfgenmsg *unused,
                              sizeof(modified), 1500U, &new_len)
         : sic_unprotect_packet(&ctx->rx, payload, (size_t)len, modified,
                                sizeof(modified), &new_len);
-    
-if (rc != 1 || new_len > UINT16_MAX) {
-    fprintf(stderr,
-        "[GATEWAY DROP] mode=%s "
-        "packet_len=%d payload_len=%zu "
-        "expanded_len=%zu result=%d\n",
-        ctx->encrypt ? "encrypt" : "decrypt",
-        len,
-        view.payload_len,
-        (size_t)len + SIC_TAG_BYTES,
-        rc);
-    goto drop;
-}
-
+    if (rc != 1 || new_len > UINT16_MAX) {
+        ctx->failed_transform++;
+        fprintf(stderr, "DROP transform: mode=%s packet_id=%u input_len=%d payload_len=%zu output_len=%zu rc=%d\n",
+                ctx->encrypt ? "encrypt" : "decrypt", id, len, view.payload_len, new_len, rc);
+        goto drop;
+    }
     ctx->accepted++;
+    ctx->forwarded_data++;
     return nfq_set_verdict(queue, id, NF_ACCEPT, (uint32_t)new_len, modified);
 drop:
     ctx->dropped++;
@@ -151,7 +153,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "nfqueue handler error\n"); break;
         }
     }
-    fprintf(stderr, "accepted=%lu dropped=%lu\n", state.accepted, state.dropped);
+    fprintf(stderr, "accepted=%lu dropped=%lu data=%lu control=%lu parse_failed=%lu transform_failed=%lu\n",
+            state.accepted, state.dropped, state.forwarded_data, state.forwarded_control,
+            state.failed_parse, state.failed_transform);
     nfq_destroy_queue(queue);
     nfq_close(h);
     OPENSSL_cleanse(&state, sizeof(state));
