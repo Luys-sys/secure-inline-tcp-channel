@@ -1,69 +1,68 @@
 # Secure Inline TCP Communication Channel
 
-A Linux-based network security prototype implemented in C.
+C11 / Linux network namespaces / Netfilter NFQUEUE / OpenSSL 3.
 
-## Project Objective
+The project implements a four-node laboratory topology:
 
-Build a secure inline communication channel:
+`PC1 -> Device1 -> Device2 -> PC2`
 
-PC1 → Device1 → Device2 → PC2
+For selected IPv4/TCP payload-bearing packets travelling from PC1 to PC2,
+Device1 encrypts the payload with AES-256-GCM and appends a 16-byte tag.
+Device2 authenticates and decrypts the payload, restores the original payload
+length and recomputes IPv4 and TCP checksums. The protected link does not
+use UDP encapsulation or add a custom data-plane header.
 
-Device1 and Device2 are intended to protect selected TCP/IPv4
-traffic using authenticated key exchange and AES-256-GCM.
+The gateways establish an authenticated X25519 session using pinned Ed25519
+peer identity public keys and derive direction-separated AES keys and nonce
+salts with HKDF-SHA256. The symmetric keys remain in process memory.
 
-The design aims to preserve IP/TCP headers and avoid UDP
-encapsulation or custom headers in protected packets.
+## Requirements
 
-## Technology Stack
+Ubuntu Linux (WSL2 works for the namespace lab), GCC, OpenSSL 3,
+Netfilter Queue, iproute2, iptables, ethtool, and iperf3.
 
-- C11 and GCC
-- Linux network namespaces and veth
-- OpenSSL 3
-- X25519 key agreement
-- Ed25519 digital signatures
-- HKDF-SHA256 key derivation
-- AES-256-GCM authenticated encryption
-- IPv4/TCP packet parsing
-- Linux Netfilter / NFQUEUE (planned)
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev libnetfilter-queue-dev \
+  iproute2 iptables iputils-ping ethtool iperf3 tcpdump
+```
 
-## Implemented Components
+## Build and tests
 
-- Individual cryptographic unit tests
-- Simulated authenticated handshake integration test
-- IPv4/TCP packet parser and checksum tests
-- Four-node virtual Linux network topology
-- End-to-end TCP connectivity testing
-- Baseline traffic inspection with tcpdump
+```bash
+make all
+make test
+bash scripts/test_handshake.sh
+```
 
-## Build and Test
+## Four-node lab
 
-Install dependencies on Ubuntu:
+Run these commands from a clean, isolated WSL2 Ubuntu environment:
 
-sudo apt install build-essential libssl-dev iproute2 \
-iputils-ping iperf3 tcpdump libnetfilter-queue-dev
+```bash
+sudo bash scripts/setup_network.sh
+bash scripts/generate_lab_identities.sh
+make all
+sudo bash scripts/run_lab.sh
+```
 
-Build and run the individual tests using the commands
-documented in their respective source files or test setup.
+The lab runner configures SYN MSS, attempts to disable veth offloads, launches
+both authenticated gateway processes, runs a selected TCP data test, checks
+packet forwarding counters and removes its own NFQUEUE / MSS rules on exit.
+It writes diagnostic logs to `captures/` (ignored by Git).
 
-## Current Status
+## Design
 
-Development prototype. The cryptographic tests and baseline
-network topology have been validated.
+- Per-direction HKDF-derived AES-256 key + independent 4-byte nonce salt
+- 96-bit GCM nonce: 4-byte salt + monotonic 64-bit encryption counter
+- Authentication-tag-only suffix; no UDP tunnel or custom protected header
+- AAD includes stable IP/TCP identifiers; mutable TTL, lengths and checksums
+  are excluded
+- Bounded nonce candidate recovery with replay bitmap
+- Empty-payload TCP packets are forwarded unchanged
 
-A real network handshake, NFQUEUE-based inline forwarding,
-nonce synchronization, TCP stream correctness and full
-encrypted end-to-end transmission are not yet implemented.
+See `docs/protected-packet-design.md` for precise supported traffic conditions,
+nonce recovery bounds, forwarding semantics, and network lab assumptions.
 
-## Security Considerations
-
-- Fresh ephemeral session key agreement is required.
-- Peer identity must be authenticated.
-- AES-GCM nonce uniqueness is mandatory.
-- Packets must fail closed on authentication errors.
-- Packet expansion and TCP sequence semantics require
-  explicit design and validation.
-- The current prototype is not production-ready.
-
-## License
-
-Not yet selected.
+This repository is an educational prototype for a controlled namespace lab,
+not a general-purpose VPN or production security gateway.

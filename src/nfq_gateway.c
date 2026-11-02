@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gateway_packet.h"
 #include "packet.h"
+#include "handshake.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -32,24 +33,6 @@ typedef struct {
     unsigned long failed_parse;
     unsigned long failed_transform;
 } gateway_ctx;
-
-static int load_lab_key(const char *path, uint8_t material[LAB_KEY_LENGTH]) {
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        (st.st_mode & (S_IRWXG | S_IRWXO)) != 0 ||
-        st.st_size != (off_t)LAB_KEY_LENGTH) return 0;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return 0;
-    size_t done = 0;
-    while (done < LAB_KEY_LENGTH) {
-        ssize_t n = read(fd, material + done, LAB_KEY_LENGTH - done);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) { close(fd); return 0; }
-        done += (size_t)n;
-    }
-    close(fd);
-    return 1;
-}
 
 static int packet_callback(struct nfq_q_handle *queue, struct nfgenmsg *unused,
                            struct nfq_data *data, void *opaque) {
@@ -96,8 +79,8 @@ drop:
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4 || (strcmp(argv[1], "encrypt") && strcmp(argv[1], "decrypt"))) {
-        fprintf(stderr, "Usage: %s encrypt|decrypt queue-number secrets/lab-direction.bin\n", argv[0]);
+    if (argc != 6 || (strcmp(argv[1], "device1") && strcmp(argv[1], "device2"))) {
+        fprintf(stderr, "Usage: %s device1|device2 queue-number peer-ip own-private.pem trusted-peer-public.pem\n", argv[0]);
         return 2;
     }
     char *end = NULL;
@@ -106,21 +89,23 @@ int main(int argc, char **argv) {
     if (errno || !end || *end || q > 65535UL) {
         fprintf(stderr, "Invalid queue number\n"); return 2;
     }
-    uint8_t material[LAB_KEY_LENGTH] = {0};
-    if (!load_lab_key(argv[3], material)) {
-        fprintf(stderr, "Key must be exactly 36 bytes in a private mode-0600 regular file\n");
-        return 1;
-    }
+    uint8_t tx_material[36] = {0}, rx_material[36] = {0};
+    int server = strcmp(argv[1], "device2") == 0;
+    /* No local symmetric-key file: session secrets come from authenticated
+       ephemeral X25519 and exist only for the lifetime of this process. */
+    if (!sic_authenticated_handshake(server, argv[3], argv[4], argv[5],
+                                     tx_material, rx_material)) return 1;
     gateway_ctx state = {0};
-    state.encrypt = strcmp(argv[1], "encrypt") == 0;
+    state.encrypt = !server; /* Selected protected direction: PC1 -> PC2. */
     if (state.encrypt) {
-        memcpy(state.tx.key, material, SIC_KEY_BYTES);
-        memcpy(state.tx.salt, material + SIC_KEY_BYTES, SIC_SALT_BYTES);
+        memcpy(state.tx.key, tx_material, SIC_KEY_BYTES);
+        memcpy(state.tx.salt, tx_material + SIC_KEY_BYTES, SIC_SALT_BYTES);
     } else {
-        memcpy(state.rx.key, material, SIC_KEY_BYTES);
-        memcpy(state.rx.salt, material + SIC_KEY_BYTES, SIC_SALT_BYTES);
+        memcpy(state.rx.key, rx_material, SIC_KEY_BYTES);
+        memcpy(state.rx.salt, rx_material + SIC_KEY_BYTES, SIC_SALT_BYTES);
     }
-    OPENSSL_cleanse(material, sizeof(material));
+    OPENSSL_cleanse(tx_material, sizeof(tx_material));
+    OPENSSL_cleanse(rx_material, sizeof(rx_material));
 
     struct sigaction action = {0};
     action.sa_handler = on_signal;
@@ -143,7 +128,7 @@ int main(int argc, char **argv) {
     }
     int fd = nfq_fd(h);
     uint8_t recvbuf[131072];
-    fprintf(stderr, "LAB-ONLY %s queue=%lu: authenticated handshake NOT connected; do not deploy\n",
+    fprintf(stderr, "Authenticated session active: %s queue=%lu\n",
             state.encrypt ? "encrypt" : "decrypt", q);
     while (keep_running) {
         ssize_t n = recv(fd, recvbuf, sizeof(recvbuf), 0);

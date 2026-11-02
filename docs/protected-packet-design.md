@@ -12,7 +12,7 @@
 
 ## Session and direction
 
-The separate authenticated handshake/control connection derives independent 256-bit AES keys and independent four-byte nonce salts for each direction (HKDF context separation). This is **not yet implemented by the actual gateway**. Keys/salts must be fresh per session; on crash/restart, never reuse a key/salt with a reset counter. Counter state is in-memory in this educational module and is not crash-safe.
+The separate authenticated handshake/control connection derives independent 256-bit AES keys and independent four-byte nonce salts for each direction (HKDF context separation). The combined gateway obtains these values directly from its authenticated handshake before joining NFQUEUE. Keys/salts must be fresh per session; on crash/restart, never reuse a key/salt with a reset counter. Counter state is in-memory in this educational module and is not crash-safe.
 
 ## Nonce without a custom header
 
@@ -22,7 +22,7 @@ The packet carries **no counter header**. Receiver authenticates by trying candi
 
 ## Additional authenticated data (AAD)
 
-The gateway will construct a stable, canonical AAD from selected immutable header fields (addresses, ports, seq, ack, flags and TCP options as applicable). Do not authenticate mutable fields such as TTL, checksums or IPv4 Total Length. Current `wire_aead` module accepts caller-provided AAD; header canonicalization and integration remain TODO.
+The gateway will construct a stable, canonical AAD from selected immutable header fields (addresses, ports, seq, ack, flags and TCP options as applicable). Do not authenticate mutable fields such as TTL, checksums or IPv4 Total Length. The gateway packet module constructs canonical AAD for selected stable IP/TCP header fields.
 
 ## Packet sizing and checksums
 
@@ -36,4 +36,4 @@ Encryption adds exactly 16 bytes. Before enabling the data plane, enforce `origi
 4. Loss/reordering/retransmission, counter exhaustion, reboot/rekey, small MTU and bidirectional flows tested.
 5. Actual NFQUEUE gateway integrations tested with normal iperf3 transfer; note explicit limitations transparently.
 
-**Status:** Step 23 implements and tests a standalone wire-AEAD counter/replay module; it is NOT wired to NFQUEUE or handshake process yet.
+**Scope:** The combined gateway uses the authenticated session for the selected PC1-to-PC2 data direction in a controlled Linux lab.

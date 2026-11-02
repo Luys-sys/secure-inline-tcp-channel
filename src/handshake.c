@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include "handshake.h"
 
 #define HELLO_SIZE 68
 #define SIG_SIZE 64
@@ -71,8 +72,8 @@ static int verify_data(EVP_PKEY *key, const unsigned char *msg, size_t n, const 
     EVP_MD_CTX_free(ctx); return ok;
 }
 static int derive_key(EVP_PKEY *my_eph, const unsigned char peer_pub[32],
-                      const unsigned char digest[32], const char *label, unsigned char out[32]) {
-    int ok = 0; unsigned char shared[32] = {0}; size_t shared_n = 32, out_n = 32;
+                      const unsigned char digest[32], const char *label, unsigned char *out, size_t requested) {
+    int ok = 0; unsigned char shared[32] = {0}; size_t shared_n = 32, out_n = requested;
     EVP_PKEY *peer = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer_pub, 32);
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(my_eph, NULL);
     EVP_PKEY_CTX *kdf = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
@@ -82,7 +83,7 @@ static int derive_key(EVP_PKEY *my_eph, const unsigned char peer_pub[32],
         EVP_PKEY_CTX_set1_hkdf_salt(kdf, digest, 32) > 0 &&
         EVP_PKEY_CTX_set1_hkdf_key(kdf, shared, 32) > 0 &&
         EVP_PKEY_CTX_add1_hkdf_info(kdf, (const unsigned char *)label, (int)strlen(label)) > 0 &&
-        EVP_PKEY_derive(kdf, out, &out_n) > 0 && out_n == 32) ok = 1;
+        EVP_PKEY_derive(kdf, out, &out_n) > 0 && out_n == requested) ok = 1;
     OPENSSL_cleanse(shared, sizeof(shared)); EVP_PKEY_CTX_free(kdf); EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(peer);
     return ok;
 }
@@ -92,12 +93,13 @@ static int mac(const unsigned char key[32], const unsigned char digest[32], cons
     memcpy(msg, role, n); memcpy(msg+n, digest, 32);
     return HMAC(EVP_sha256(), key, 32, msg, n+32, out, &out_n) && out_n == 32;
 }
-static int run_handshake(int fd, int server, EVP_PKEY *identity, EVP_PKEY *trusted) {
+static int run_handshake(int fd, int server, EVP_PKEY *identity, EVP_PKEY *trusted,
+                         unsigned char out_tx[36], unsigned char out_rx[36]) {
     int ok = 0;
     unsigned char mine[HELLO_SIZE] = {0}, theirs[HELLO_SIZE] = {0};
     unsigned char signature[SIG_SIZE], peer_sig[SIG_SIZE];
     unsigned char transcript[sizeof(prefix)-1+2*HELLO_SIZE];
-    unsigned char digest[32], confirm_key[32] = {0}, tx_key[32] = {0}, rx_key[32] = {0};
+    unsigned char digest[32], confirm_key[32] = {0}, tx_key[36] = {0}, rx_key[36] = {0};
     unsigned char finished[FIN_SIZE], peer_finished[FIN_SIZE], expected[FIN_SIZE], public_eph[32];
     EVP_PKEY *eph = make_ephemeral(public_eph);
     if (!eph) goto end;
@@ -124,13 +126,15 @@ static int run_handshake(int fd, int server, EVP_PKEY *identity, EVP_PKEY *trust
         !write_exact(fd, signature, SIG_SIZE) || !read_exact(fd, peer_sig, SIG_SIZE)) goto end;
     signed_msg[32] = server ? 1 : 2;
     if (!verify_data(trusted, signed_msg, sizeof(signed_msg), peer_sig)) goto end;
-    if (!derive_key(eph, theirs+36, digest, "SIC1 confirmation", confirm_key) ||
-        !derive_key(eph, theirs+36, digest, server ? "SIC1 device2-to-device1" : "SIC1 device1-to-device2", tx_key) ||
-        !derive_key(eph, theirs+36, digest, server ? "SIC1 device1-to-device2" : "SIC1 device2-to-device1", rx_key)) goto end;
+    if (!derive_key(eph, theirs+36, digest, "SIC1 confirmation", confirm_key, 32) ||
+        !derive_key(eph, theirs+36, digest, server ? "SIC1 device2-to-device1" : "SIC1 device1-to-device2", tx_key, 36) ||
+        !derive_key(eph, theirs+36, digest, server ? "SIC1 device1-to-device2" : "SIC1 device2-to-device1", rx_key, 36)) goto end;
     if (!mac(confirm_key, digest, server ? "server" : "client", finished) ||
         !mac(confirm_key, digest, server ? "client" : "server", expected)) goto end;
     if (!write_exact(fd, finished, FIN_SIZE) || !read_exact(fd, peer_finished, FIN_SIZE) ||
         CRYPTO_memcmp(peer_finished, expected, FIN_SIZE) != 0) goto end;
+    memcpy(out_tx, tx_key, 36);
+    memcpy(out_rx, rx_key, 36);
     printf("PASS: authenticated X25519 handshake and key confirmation (%s)\n", server ? "device2" : "device1");
     printf("PASS: directional session keys derived; keys are not printed or persisted\n");
     ok = 1;
@@ -144,7 +148,6 @@ end:
 static int open_socket(int server, const char *ip) {
     int fd = socket(AF_INET, SOCK_STREAM, 0); if (fd < 0) return -1;
     struct timeval tv = { .tv_sec = 8, .tv_usec = 0 };
-   
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     struct sockaddr_in addr = {0}; addr.sin_family = AF_INET; addr.sin_port = htons(PORT);
     if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) { close(fd); return -1; }
@@ -160,18 +163,40 @@ static int open_socket(int server, const char *ip) {
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr))) { close(fd); return -1; }
     return fd;
 }
-int main(int argc, char **argv) {
+int sic_authenticated_handshake(int server, const char *ip, const char *private_path,
+                                const char *peer_public_path,
+                                unsigned char tx_material[36], unsigned char rx_material[36]) {
+    if (!ip || !private_path || !peer_public_path || !tx_material || !rx_material) return 0;
+    memset(tx_material, 0, 36); memset(rx_material, 0, 36);
     signal(SIGPIPE, SIG_IGN);
+    EVP_PKEY *own = load_private(private_path);
+    EVP_PKEY *peer = load_public(peer_public_path);
+    if (!own || !peer) {
+        fprintf(stderr, "Cannot load identity keys\n");
+        EVP_PKEY_free(own); EVP_PKEY_free(peer); return 0;
+    }
+    int fd = open_socket(server, ip);
+    if (fd < 0) {
+        perror("socket/connection");
+        EVP_PKEY_free(own); EVP_PKEY_free(peer); return 0;
+    }
+    int ok = run_handshake(fd, server, own, peer, tx_material, rx_material);
+    if (!ok) {
+        fprintf(stderr, "FAIL: handshake authentication or key confirmation\n");
+        OPENSSL_cleanse(tx_material, 36); OPENSSL_cleanse(rx_material, 36);
+    }
+    close(fd); EVP_PKEY_free(own); EVP_PKEY_free(peer);
+    return ok;
+}
+#ifndef SIC_HANDSHAKE_LIBRARY
+int main(int argc, char **argv) {
     if (argc != 5 || (strcmp(argv[1], "device1") && strcmp(argv[1], "device2"))) {
         fprintf(stderr, "Usage: %s device1|device2 peer-ip own-private.pem trusted-peer-public.pem\n", argv[0]); return 2;
     }
-    int server = strcmp(argv[1], "device2") == 0;
-    EVP_PKEY *own = load_private(argv[3]); EVP_PKEY *peer = load_public(argv[4]);
-    if (!own || !peer) { fprintf(stderr, "Cannot load identity keys\n"); EVP_PKEY_free(own); EVP_PKEY_free(peer); return 1; }
-    int fd = open_socket(server, argv[2]);
-    if (fd < 0) { perror("socket/connection"); EVP_PKEY_free(own); EVP_PKEY_free(peer); return 1; }
-    int ok = run_handshake(fd, server, own, peer);
-    if (!ok) fprintf(stderr, "FAIL: handshake authentication or key confirmation\n");
-    close(fd); EVP_PKEY_free(own); EVP_PKEY_free(peer);
+    unsigned char tx[36], rx[36];
+    int ok = sic_authenticated_handshake(strcmp(argv[1], "device2") == 0,
+                                          argv[2], argv[3], argv[4], tx, rx);
+    OPENSSL_cleanse(tx, sizeof(tx)); OPENSSL_cleanse(rx, sizeof(rx));
     return ok ? 0 : 1;
 }
+#endif
