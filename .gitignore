@@ -57,3 +57,8 @@ nfq_gateway
 nfq_observer
 handshake
 test_*
+
+# Temporary development copies
+secure-inline-next/
+secure-inline-review/
+4

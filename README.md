@@ -35,6 +35,32 @@ make test
 bash scripts/test_handshake.sh
 ```
 
+## Automated Verification
+
+The project includes reproducible verification scripts
+for the authenticated communication channel.
+
+Run the complete build and integration checks:
+
+```bash
+./scripts/final_verify.sh
+```
+
+Verify encrypted TCP payloads on the protected link:
+
+```bash
+sudo bash scripts/wire_verify.sh
+```
+
+The wire-level test captures traffic before encryption,
+between Device1 and Device2, and after decryption.
+
+It verifies that:
+- Protected TCP payloads differ from plaintext.
+- AES-GCM adds a 16-byte authentication tag.
+- Decrypted TCP payloads match the original data.
+- Selected TCP traffic traverses both authenticated gateways.
+
 ## Four-node lab
 
 Run these commands from a clean, isolated WSL2 Ubuntu environment:
