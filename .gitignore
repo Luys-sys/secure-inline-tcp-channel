@@ -28,3 +28,9 @@ private/
 *.log
 *.tmp
 .vscode/
+
+# Downloaded intermediate materials
+secure-inline-*-step/
+
+# Windows download metadata
+*:Zone.Identifier
