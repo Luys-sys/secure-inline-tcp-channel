@@ -1,0 +1,10 @@
+CC = gcc
+CFLAGS = -std=c11 -O2 -Wall -Wextra -Werror -Iinclude
+COMMON = src/packet.c src/wire_aead.c src/gateway_packet.c
+.PHONY: test-step24
+
+test_gateway_packet: $(COMMON) tests/test_gateway_packet.c
+	$(CC) $(CFLAGS) $^ -o $@ -lcrypto
+
+test-step24: test_gateway_packet
+	./test_gateway_packet

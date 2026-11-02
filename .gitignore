@@ -39,3 +39,6 @@ nfq_observer
 
 test_wire_aead
 step23-import/
+
+test_gateway_packet
+step24-import/
