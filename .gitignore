@@ -1,0 +1,30 @@
+# Compiled binaries
+secure-inline
+test_x25519
+test_aead
+test_hkdf
+test_ed25519
+test_session
+test_packet
+*.o
+*.so
+*.a
+
+# Packet captures
+captures/
+*.pcap
+*.pcapng
+
+# Private keys and secrets
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+private/
+
+# Temporary files
+*.zip
+*.log
+*.tmp
+.vscode/
